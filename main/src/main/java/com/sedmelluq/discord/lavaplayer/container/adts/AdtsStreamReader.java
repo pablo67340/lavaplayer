@@ -73,6 +73,8 @@ public class AdtsStreamReader {
 
   private AdtsPacketHeader scanForPacketHeader(int maximumDistance) throws IOException {
     int bufferPosition = 0;
+    boolean isID3 = false;
+    int id3BytesToSkip = 0;
 
     while (true) {
       int nextByte = inputStream.read();
@@ -85,24 +87,28 @@ public class AdtsStreamReader {
       scanBuffer[bufferPosition++] = (byte) nextByte;
 
       if (bufferPosition >= 3 && scanBuffer[0] == 'I' && scanBuffer[1] == 'D' && scanBuffer[2] == '3') {
-        // Skip ID3 metadata
-        if (bufferPosition < 10) {
-          // We need at least 10 bytes to determine the ID3 size
-          while (bufferPosition < 10) {
-            scanBuffer[bufferPosition++] = (byte) inputStream.read();
-          }
+        isID3 = true;
+      }
+
+      if (isID3 && bufferPosition >= 10) {
+        // Calculate the size of the ID3 tag if not already calculated
+        if (id3BytesToSkip == 0) {
+          int id3Size = (scanBuffer[6] & 0x7F) << 21 | (scanBuffer[7] & 0x7F) << 14 | (scanBuffer[8] & 0x7F) << 7 | (scanBuffer[9] & 0x7F);
+          id3BytesToSkip = id3Size + 10; // Add 10 for the header itself
+          System.out.println("ID3 tag found. Size: " + id3Size);
+          System.out.println("ID3 tag content: " + Arrays.toString(Arrays.copyOfRange(scanBuffer, 0, Math.min(id3BytesToSkip, scanBuffer.length))));
         }
 
-        int id3Size = (scanBuffer[6] & 0x7F) << 21 | (scanBuffer[7] & 0x7F) << 14 | (scanBuffer[8] & 0x7F) << 7 | (scanBuffer[9] & 0x7F);
-        System.out.println("ID3 tag found. Size: " + id3Size);
-
-        // Skip the ID3 tag content
-        inputStream.read(scanBuffer, 0, id3Size);
-
-        // Print the entire ID3 tag content for debugging
-        System.out.println("ID3 tag content: " + Arrays.toString(Arrays.copyOfRange(scanBuffer, 0, Math.min(id3Size, scanBuffer.length))));
+        // Skip the remaining bytes of the ID3 tag
+        int bytesToSkip = id3BytesToSkip - bufferPosition;
+        while (bytesToSkip > 0) {
+          int skipped = (int) inputStream.skip(bytesToSkip);
+          bytesToSkip -= skipped;
+        }
 
         bufferPosition = 0;
+        isID3 = false;
+        id3BytesToSkip = 0;
         continue;
       }
 
@@ -121,6 +127,7 @@ public class AdtsStreamReader {
       }
     }
   }
+
 
   private AdtsPacketHeader readHeaderFromBufferTail(int position) throws IOException {
     scanByteBuffer.position(position - HEADER_BASE_SIZE);
