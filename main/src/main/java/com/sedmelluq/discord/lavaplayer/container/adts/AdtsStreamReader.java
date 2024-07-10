@@ -5,6 +5,7 @@ import com.sedmelluq.discord.lavaplayer.tools.io.BitBufferReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 /**
  * Finds and reads ADTS packet headers from an input stream.
@@ -15,9 +16,9 @@ public class AdtsStreamReader {
   private static final int HEADER_BASE_SIZE = 7;
   private static final int INVALID_VALUE = -1;
 
-  private static final int[] sampleRateMapping = new int[] {
-      96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
-      16000, 12000, 11025, 8000, 7350, INVALID_VALUE, INVALID_VALUE, INVALID_VALUE
+  private static final int[] sampleRateMapping = new int[]{
+          96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+          16000, 12000, 11025, 8000, 7350, INVALID_VALUE, INVALID_VALUE, INVALID_VALUE
   };
 
   private final InputStream inputStream;
@@ -31,7 +32,7 @@ public class AdtsStreamReader {
    */
   public AdtsStreamReader(InputStream inputStream) {
     this.inputStream = inputStream;
-    this.scanBuffer = new byte[32];
+    this.scanBuffer = new byte[1024]; // Increase buffer size to read more data
     this.scanByteBuffer = ByteBuffer.wrap(scanBuffer);
     this.scanBufferReader = new BitBufferReader(scanByteBuffer);
   }
@@ -73,19 +74,35 @@ public class AdtsStreamReader {
   private AdtsPacketHeader scanForPacketHeader(int maximumDistance) throws IOException {
     int bufferPosition = 0;
 
-    for (int i = 0; i < maximumDistance; i++) {
+    while (true) {
       int nextByte = inputStream.read();
 
       if (nextByte == -1) {
+        System.out.println("Reached end of stream while scanning for packet header.");
         return EOF_PACKET;
       }
 
       scanBuffer[bufferPosition++] = (byte) nextByte;
 
+      if (bufferPosition >= 3 && scanBuffer[0] == 'I' && scanBuffer[1] == 'D' && scanBuffer[2] == '3') {
+        // Skip ID3 metadata
+        inputStream.read(scanBuffer, 0, 7); // Read rest of ID3 header
+        int id3Size = (scanBuffer[2] & 0x7F) << 21 | (scanBuffer[3] & 0x7F) << 14 | (scanBuffer[4] & 0x7F) << 7 | (scanBuffer[5] & 0x7F);
+        System.out.println("ID3 tag found. Size: " + id3Size);
+        inputStream.read(scanBuffer, 0, id3Size); // Read the whole ID3 tag
+
+        // Print the entire ID3 tag content
+        System.out.println("ID3 tag content: " + Arrays.toString(Arrays.copyOfRange(scanBuffer, 0, id3Size)));
+
+        bufferPosition = 0;
+        continue;
+      }
+
       if (bufferPosition >= HEADER_BASE_SIZE) {
         AdtsPacketHeader header = readHeaderFromBufferTail(bufferPosition);
 
         if (header != null) {
+          System.out.println("Found ADTS packet header: " + header);
           return header;
         }
       }
@@ -95,8 +112,6 @@ public class AdtsStreamReader {
         bufferPosition = HEADER_BASE_SIZE;
       }
     }
-
-    return null;
   }
 
   private AdtsPacketHeader readHeaderFromBufferTail(int position) throws IOException {
@@ -112,6 +127,7 @@ public class AdtsStreamReader {
       int crcSecond = inputStream.read();
 
       if (crcFirst == -1 || crcSecond == -1) {
+        System.out.println("Reached end of stream while reading CRC.");
         return EOF_PACKET;
       }
     }
@@ -125,11 +141,10 @@ public class AdtsStreamReader {
     }
   }
 
+  
   private static AdtsPacketHeader readHeader(BitBufferReader reader) {
     if ((reader.asLong(15) & 0x7FFB) != 0x7FF8) {
-      // Possible reasons:
-      // 1) Syncword is not present, cannot be an ADTS header
-      // 2) Layer value is not 0, which must always be 0 for ADTS
+      System.out.println("Failed to find syncword and layer bits in header.");
       return null;
     }
 
@@ -143,6 +158,7 @@ public class AdtsStreamReader {
     int channels = reader.asInteger(3);
 
     if (sampleRate == INVALID_VALUE || channels == 0) {
+      System.out.println("Invalid sample rate or channel count in header.");
       return null;
     }
 
@@ -156,7 +172,7 @@ public class AdtsStreamReader {
     reader.asLong(11);
 
     if (reader.asLong(2) != 0) {
-      // Not handling multiple frames per packet
+      System.out.println("Multiple frames per packet not supported.");
       return null;
     }
 

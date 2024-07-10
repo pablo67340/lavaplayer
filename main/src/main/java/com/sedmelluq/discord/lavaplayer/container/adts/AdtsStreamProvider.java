@@ -62,7 +62,7 @@ public class AdtsStreamProvider {
       while (true) {
         AdtsPacketHeader header = streamReader.findPacketHeader();
         if (header == null) {
-          // Reached EOF while scanning for header
+          System.out.println("Reached end of stream while scanning for packet header.");
           return;
         }
 
@@ -74,7 +74,7 @@ public class AdtsStreamProvider {
         ByteBuffer buffer = directBufferBroker.getBuffer();
 
         if (buffer.limit() < header.payloadLength) {
-          // Reached EOF in the middle of a packet
+          System.out.println("Reached end of stream in the middle of a packet.");
           return;
         }
 
@@ -82,6 +82,7 @@ public class AdtsStreamProvider {
         streamReader.nextPacket();
       }
     } catch (IOException e) {
+      System.err.println("IOException in provideFrames: " + e.getMessage());
       throw new RuntimeException(e);
     }
   }
@@ -92,12 +93,13 @@ public class AdtsStreamProvider {
     if (downstream == null) {
       AacDecoder.StreamInfo streamInfo = decoder.resolveStreamInfo();
       if (streamInfo == null) {
+        System.err.println("StreamInfo is null");
         return;
       }
 
       downstream = AudioPipelineFactory.create(context, new PcmFormat(streamInfo.channels, streamInfo.sampleRate));
       outputBuffer = ByteBuffer.allocateDirect(2 * streamInfo.frameSize * streamInfo.channels)
-          .order(ByteOrder.nativeOrder()).asShortBuffer();
+              .order(ByteOrder.nativeOrder()).asShortBuffer();
 
       if (requestedTimecode != null) {
         downstream.seekPerformed(requestedTimecode, providedTimecode);

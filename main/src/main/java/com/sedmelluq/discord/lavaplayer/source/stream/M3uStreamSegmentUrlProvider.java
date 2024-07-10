@@ -1,7 +1,6 @@
 package com.sedmelluq.discord.lavaplayer.source.stream;
 
 import com.sedmelluq.discord.lavaplayer.container.playlists.ExtendedM3uParser;
-import com.sedmelluq.discord.lavaplayer.tools.ExceptionTools;
 import com.sedmelluq.discord.lavaplayer.tools.FriendlyException;
 import com.sedmelluq.discord.lavaplayer.tools.io.HttpClientTools;
 import com.sedmelluq.discord.lavaplayer.tools.io.HttpInterface;
@@ -9,12 +8,20 @@ import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.util.EntityUtils;
 
+import javax.crypto.*;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static com.sedmelluq.discord.lavaplayer.tools.FriendlyException.Severity.SUSPICIOUS;
@@ -32,6 +39,7 @@ public abstract class M3uStreamSegmentUrlProvider {
 
   protected String baseUrl;
   protected SegmentInfo lastSegment;
+  protected Cipher cipher;
 
   protected M3uStreamSegmentUrlProvider() {
     this(null);
@@ -72,6 +80,7 @@ public abstract class M3uStreamSegmentUrlProvider {
   protected String getNextSegmentUrl(HttpInterface httpInterface) {
     try {
       String streamSegmentPlaylistUrl = fetchSegmentPlaylistUrl(httpInterface);
+
       if (streamSegmentPlaylistUrl == null) {
         return null;
       }
@@ -96,10 +105,26 @@ public abstract class M3uStreamSegmentUrlProvider {
 
       lastSegment = nextSegment;
       return createSegmentUrl(streamSegmentPlaylistUrl, lastSegment.url);
-    } catch (IOException e) {
+    } catch (IOException | URISyntaxException e) {
       throw new FriendlyException("Failed to get next part of the stream.", SUSPICIOUS, e);
     } catch (InterruptedException e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  public void initializeCipher(HttpInterface httpInterface, String uri) throws IOException {
+    try (CloseableHttpResponse httpResponse = httpInterface.execute(new HttpGet(uri))) {
+      HttpClientTools.assertSuccessWithContent(httpResponse, "retrieve cipher key");
+
+      byte[] cipherKey = EntityUtils.toByteArray(httpResponse.getEntity());
+      SecretKeySpec keySpec = new SecretKeySpec(cipherKey, "AES");
+      byte[] iv = new byte[16]; // default IV of all zeros
+
+      cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+      cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(iv));
+      System.out.println("Cipher initialized successfully with key: " + Arrays.toString(cipherKey) + " and IV: " + Arrays.toString(iv));
+    } catch (NoSuchPaddingException | NoSuchAlgorithmException | InvalidKeyException | InvalidAlgorithmParameterException e) {
+      throw new RuntimeException("Error initializing cipher", e);
     }
   }
 
@@ -113,24 +138,73 @@ public abstract class M3uStreamSegmentUrlProvider {
     httpInterface.getContext().setRequestConfig(streamingRequestConfig);
     String url = getNextSegmentUrl(httpInterface);
     if (url == null) {
+      System.err.println("No URL for the next segment found.");
       return null;
     }
 
+    System.out.println("Fetching segment from URL: " + url);
     CloseableHttpResponse response = null;
-    boolean success = false;
 
     try {
       response = httpInterface.execute(createSegmentGetRequest(url));
       HttpClientTools.assertSuccessWithContent(response, "segment data URL");
 
-      success = true;
-      return response.getEntity().getContent();
+      InputStream segmentStream = response.getEntity().getContent();
+      System.out.println("Segment stream obtained, starting decryption...");
+
+      InputStream cipherStream = new CipherInputStream(segmentStream, cipher);
+      System.out.println("Cipher stream created.");
+
+      // Read and log the first few bytes of decrypted data for inspection
+      CloseableHttpResponse finalResponse = response;
+      InputStream logStream = new InputStream() {
+        private final byte[] buffer = new byte[32];
+        private int bytesRead = 0;
+
+        @Override
+        public int read() throws IOException {
+          int byteRead = cipherStream.read();
+          if (bytesRead < buffer.length) {
+            buffer[bytesRead++] = (byte) byteRead;
+          }
+          return byteRead;
+        }
+
+        @Override
+        public int read(byte[] b) throws IOException {
+          int len = cipherStream.read(b);
+          if (bytesRead < buffer.length) {
+            int toCopy = Math.min(buffer.length - bytesRead, len);
+            System.arraycopy(b, 0, buffer, bytesRead, toCopy);
+            bytesRead += toCopy;
+          }
+          return len;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+          int bytesRead = cipherStream.read(b, off, len);
+          if (this.bytesRead < buffer.length) {
+            int toCopy = Math.min(buffer.length - this.bytesRead, bytesRead);
+            System.arraycopy(b, off, buffer, this.bytesRead, toCopy);
+            this.bytesRead += toCopy;
+          }
+          return bytesRead;
+        }
+
+        @Override
+        public void close() throws IOException {
+          cipherStream.close();
+          finalResponse.close();
+          System.out.println("Segment and response streams closed.");
+          System.out.println("Decrypted first few bytes: " + Arrays.toString(buffer));
+        }
+      };
+
+      return logStream;
     } catch (IOException e) {
-      throw new RuntimeException(e);
-    } finally {
-      if (response != null && !success) {
-        ExceptionTools.closeWithWarnings(response);
-      }
+      System.err.println("Error fetching or decrypting segment data: " + e.getMessage());
+      throw new RuntimeException("Error fetching segment data", e);
     }
   }
 
@@ -138,8 +212,6 @@ public abstract class M3uStreamSegmentUrlProvider {
 
   protected boolean isAbsoluteUrl(String url) {
     try {
-      // A URL is considered absolute if we don't have a baseUrl (so cannot convert a relative URL)
-      // or if URI#isAbsolute returns true.
       return this.baseUrl == null || new URI(url).isAbsolute();
     } catch (URISyntaxException e) {
       return false;
@@ -147,7 +219,7 @@ public abstract class M3uStreamSegmentUrlProvider {
   }
 
   protected String getAbsoluteUrl(String url) {
-    return baseUrl + ((url.startsWith("/")) ? url : "/" + url);
+    return baseUrl + (url.startsWith("/") ? url : "/" + url);
   }
 
   protected List<ChannelStreamInfo> loadChannelStreamsList(String[] lines) {
@@ -173,15 +245,23 @@ public abstract class M3uStreamSegmentUrlProvider {
     return streams;
   }
 
-  protected List<SegmentInfo> loadStreamSegmentsList(HttpInterface httpInterface, String streamSegmentPlaylistUrl) throws IOException {
+  protected List<SegmentInfo> loadStreamSegmentsList(HttpInterface httpInterface, String streamSegmentPlaylistUrl) throws IOException, URISyntaxException {
     List<SegmentInfo> segments = new ArrayList<>();
     ExtendedM3uParser.Line segmentInfo = null;
 
     for (String lineText : fetchResponseLines(httpInterface, new HttpGet(streamSegmentPlaylistUrl), "stream segments list")) {
       ExtendedM3uParser.Line line = ExtendedM3uParser.parseLine(lineText);
+      if (line.isDirective()) {
+        if ("EXTINF".equals(line.directiveName)) {
+          segmentInfo = line;
+        } else if ("EXT-X-KEY".equals(line.directiveName) && cipher == null) {
+          String keyUri = line.directiveArguments.get("URI");
+          URI baseUri = new URI(streamSegmentPlaylistUrl);
+          URI resolvedUri = baseUri.resolve(keyUri);
 
-      if (line.isDirective() && "EXTINF".equals(line.directiveName)) {
-        segmentInfo = line;
+          System.out.println("Got Cipher URI: " + resolvedUri);
+          initializeCipher(httpInterface, resolvedUri.toString());
+        }
       }
 
       if (line.isData()) {
