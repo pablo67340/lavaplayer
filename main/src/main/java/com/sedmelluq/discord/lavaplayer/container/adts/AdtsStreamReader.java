@@ -73,6 +73,7 @@ public class AdtsStreamReader {
 
   private AdtsPacketHeader scanForPacketHeader(int maximumDistance) throws IOException {
     int bufferPosition = 0;
+    boolean isID3 = false;
 
     while (true) {
       int nextByte = inputStream.read();
@@ -85,9 +86,12 @@ public class AdtsStreamReader {
       scanBuffer[bufferPosition++] = (byte) nextByte;
 
       if (bufferPosition >= 3 && scanBuffer[0] == 'I' && scanBuffer[1] == 'D' && scanBuffer[2] == '3') {
+        isID3 = true;
+      }
+
+      if (isID3 && bufferPosition >= 10) {
         // Skip ID3 metadata
-        inputStream.read(scanBuffer, 0, 7); // Read rest of ID3 header
-        int id3Size = (scanBuffer[2] & 0x7F) << 21 | (scanBuffer[3] & 0x7F) << 14 | (scanBuffer[4] & 0x7F) << 7 | (scanBuffer[5] & 0x7F);
+        int id3Size = (scanBuffer[6] & 0x7F) << 21 | (scanBuffer[7] & 0x7F) << 14 | (scanBuffer[8] & 0x7F) << 7 | (scanBuffer[9] & 0x7F);
         System.out.println("ID3 tag found. Size: " + id3Size);
         inputStream.read(scanBuffer, 0, id3Size); // Read the whole ID3 tag
 
@@ -95,6 +99,7 @@ public class AdtsStreamReader {
         System.out.println("ID3 tag content: " + Arrays.toString(Arrays.copyOfRange(scanBuffer, 0, id3Size)));
 
         bufferPosition = 0;
+        isID3 = false;
         continue;
       }
 
